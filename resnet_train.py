@@ -8,7 +8,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from dataloader.gtsrb_loader import GTSRB_load
 from models.resnet import ResNetWithSTN 
-from src.cfg import NUM_CLASSES, BATCH, EPOCHS, LR, WEIGHT_DECAY, IMAGE_SIZE, DEVICE, GTSRB_TRAINING_PATH, RESNET_CHECKPOINT_PATH, RESNET_FIGURE_PATH
+from src.cfg import GTSRB_NUM_CLASSES, BATCH, EPOCHS, LR, WEIGHT_DECAY, IMAGE_SIZE, DEVICE, GTSRB_TRAINING_PATH, RESNET_CHECKPOINT_PATH, RESNET_FIGURE_PATH
 from src.earlystopping import EarlyStopping
 from src.cfg import EARLY_STOPPING_PARAMS
 
@@ -19,21 +19,19 @@ def train_resnet_with_stn():
     train_dataset = GTSRB_load(training_dir=GTSRB_TRAINING_PATH, mode='train')
     val_dataset = GTSRB_load(training_dir=GTSRB_TRAINING_PATH, mode='val')
     
-    train_loader = DataLoader(train_dataset, batch_size=BATCH, shuffle=True, num_workers=3)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH, shuffle=False, num_workers=3)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH, shuffle=False, num_workers=0)
 
-    # Use ResNetWithSTN model
-    model = ResNetWithSTN(num_classes=NUM_CLASSES, stn_filters=(16, 32), stn_fc_units=128, input_size=IMAGE_SIZE)
+    model = ResNetWithSTN(num_classes=GTSRB_NUM_CLASSES, stn_filters=(16, 32), stn_fc_units=128, input_size=IMAGE_SIZE)
     model = model.to(DEVICE)
 
     # stage 2
     if os.path.exists(RESNET_CHECKPOINT_PATH):
         checkpoint = torch.load(RESNET_CHECKPOINT_PATH, map_location=DEVICE)
-        print(f"Checkpoint keys: {list(checkpoint.keys())}")  # Debug: Show checkpoint structure
+        print(f"Checkpoint keys: {list(checkpoint.keys())}")  
         
-        # Load model state
         try:
-            model.load_state_dict(checkpoint, strict=False)  # Use strict=False to handle fc mismatch
+            model.load_state_dict(checkpoint, strict=False)  
             print(f"Loaded model weights from {RESNET_CHECKPOINT_PATH}")
         except Exception as e:
             print(f"Error loading model state_dict: {e}")
@@ -41,27 +39,32 @@ def train_resnet_with_stn():
     else:
         print(f"No checkpoint found at {RESNET_CHECKPOINT_PATH}. Starting with pretrained ImageNet weights.")
     
-    model.unfreeze_layers(layer_names=['layer4', 'fc'])
+    model.unfreeze_layers(layer_names=['layer3', 'layer4', 'fc'])
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {trainable_params}")
     
     optimizer = optim.Adam([
         {'params': model.stn.parameters(), 'lr': LR},
-        {'params': model.resnet.fc.parameters(), 'lr': LR * 0.1},
-        {'params': model.resnet.layer4.parameters(), 'lr': LR * 0.1}
+        {'params': model.resnet.fc.parameters(), 'lr': LR * 0.05},
+        {'params': model.resnet.layer4.parameters(), 'lr': LR * 0.05},
+        {'params': model.resnet.layer3.parameters(), 'lr': LR * 0.1},
     ], lr=LR, weight_decay=WEIGHT_DECAY)
+
+    print("Starting fine-tuning with the following optimizer configuration:")
+    for i, param_group in enumerate(optimizer.param_groups):
+        print(f"Param group {i}: Learning rate = {param_group['lr']}, Weight decay = {param_group.get('weight_decay', 0)}")
     
-    if os.path.exists(RESNET_CHECKPOINT_PATH):
-        checkpoint = torch.load(RESNET_CHECKPOINT_PATH, map_location=DEVICE)
-        try:
-            if 'optimizer_state_dict' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                print("Loaded optimizer state from checkpoint")
-            else:
-                print("Optimizer state not found in checkpoint. Initializing new optimizer.")
-        except Exception as e:
-            print(f"Error loading optimizer state: {e}")
-            print("Initializing new optimizer.")
+    # if os.path.exists(RESNET_CHECKPOINT_PATH):
+    #     checkpoint = torch.load(RESNET_CHECKPOINT_PATH, map_location=DEVICE)
+    #     try:
+    #         if 'optimizer_state_dict' in checkpoint:
+    #             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    #             print("Loaded optimizer state from checkpoint")
+    #         else:
+    #             print("Optimizer state not found in checkpoint. Initializing new optimizer.")
+    #     except Exception as e:
+    #         print(f"Error loading optimizer state: {e}")
+    #         print("Initializing new optimizer.")
     
     criterion = nn.CrossEntropyLoss()
     scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
@@ -76,7 +79,8 @@ def train_resnet_with_stn():
     val_losses = []
     train_accuracies = []
     val_accuracies = []
-    
+    checkpoint_epoch = None  
+
     for epoch in range(EPOCHS):
         model.train()
         running_loss = 0.0
@@ -136,11 +140,18 @@ def train_resnet_with_stn():
 
         if early_stopping.early_stop:
             print("Early stopping triggered. Training stopped.")
+            checkpoint_epoch = epoch + 1 
             break
 
         scheduler.step()
 
     print(f"Training complete. Model saved to: {RESNET_CHECKPOINT_PATH}")
+
+    if checkpoint_epoch is not None:
+        train_losses = train_losses[:checkpoint_epoch]
+        val_losses = val_losses[:checkpoint_epoch]
+        train_accuracies = train_accuracies[:checkpoint_epoch]
+        val_accuracies = val_accuracies[:checkpoint_epoch]
 
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
@@ -160,7 +171,7 @@ def train_resnet_with_stn():
     ax2.tick_params(axis='y', labelcolor='green')
     ax2.legend(loc='upper right')
 
-    loss_png_path = os.path.join(RESNET_FIGURE_PATH, "resnet_loss_accuracy_stage2.png")
+    loss_png_path = os.path.join(RESNET_FIGURE_PATH, "resnet_loss_accuracy_stage4.png")
     plt.title('Training and Validation Loss and Accuracy')
     plt.savefig(loss_png_path)
     plt.close()
